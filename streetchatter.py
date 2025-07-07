@@ -1,4 +1,5 @@
 from bs4 import BeautifulSoup
+from dotenv import load_dotenv
 from faiss import IndexFlatL2
 from langchain.document_transformers import LongContextReorder
 from langchain.schema.output_parser import StrOutputParser
@@ -13,13 +14,13 @@ from langchain_nvidia_ai_endpoints import NVIDIAEmbeddings, ChatNVIDIA
 import logging
 from operator import itemgetter
 import os
-from dotenv import load_dotenv
+import re
 import requests
 
 
 EMBEDDING_MODEL_NAME = 'nvidia/nv-embed-v1'
 CHAT_MODEL_NAME = 'meta/llama-3.3-70b-instruct'
-SECTION_DIVIDER = '-' * 50 + '\n\n'
+DIVIDER = '-' * 50 + '\n\n'
 TARGET_HEADERS = [
     'Characteristics', 'Appearance', 'Personality', 'Character Relationships',
     'Story', 'Gameplay']
@@ -48,6 +49,8 @@ SF_CHAR_WIKI_PAGES = {
 CONV_HISTORY_LIMIT = 20  # must be even number to account for user input and
 # StreetChatter output
 NUM_DOCS_TO_RETRIEVE = 10
+NUM_EXAMPLE_QUOTES = 2
+NUM_WORDS_PERSONALITY_DESC = 120
 
 
 class StreetChatter:
@@ -74,13 +77,13 @@ class StreetChatter:
         self.logger.info(f'Using {EMBEDDING_MODEL_NAME} embedding model.')
         self.logger.info(f'Using {CHAT_MODEL_NAME} chat model.')
 
+        # get Street Fighter Wiki page from character name
+        sf_char_wiki_page = SF_CHAR_WIKI_PAGES[self.character_name]
+
         # utility function to get Street Fighter character context from Street
         # Fighter Wiki via webscraping
-        def get_sf_char_context():
-            # get Street Fighter Wiki page from character name
-            sf_char_wiki_page = SF_CHAR_WIKI_PAGES[self.character_name]
-
-            # get HTML of webpage as text, get header and paragraph elements
+        def scrape_sf_char_context():
+            # get HTML of webpage, get header and paragraph elements
             response = requests.get(sf_char_wiki_page)
             response.raise_for_status()
             soup = BeautifulSoup(response.text, 'html.parser')
@@ -137,7 +140,7 @@ class StreetChatter:
                             # add divider between sections (not before the
                             # first one)
                             if not first_section:
-                                context += SECTION_DIVIDER
+                                context += DIVIDER
                             first_section = False
                         else:
                             # update breadcrumbs with nested target header
@@ -147,7 +150,7 @@ class StreetChatter:
                                     current_base_level)
 
                             # add section divider
-                            context += SECTION_DIVIDER
+                            context += DIVIDER
 
                         # add breadcrumbs path
                         context = _add_breadcrumbs_to_context(
@@ -166,7 +169,7 @@ class StreetChatter:
                                     current_base_level)
 
                             # add section divider
-                            context += SECTION_DIVIDER
+                            context += DIVIDER
 
                             # add breadcrumbs path
                             context = _add_breadcrumbs_to_context(
@@ -183,10 +186,108 @@ class StreetChatter:
             # return context
             return context.strip()
 
+        # utility function to get Street Fighter character quotes from Street
+        # Fighter Wiki via webscraping
+        def scrape_sf_char_quotes():
+            # utility function to remove non-English text from input
+            def _keep_english_text(text):
+                # keep English letters, digits, punctuation, and whitespace
+                english_text = re.sub(r'[^\x20-\x7E]', '', text)
+                return english_text.strip()
+
+            # get HTML of webpage
+            response = requests.get(sf_char_wiki_page + '/Quotes')
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, 'html.parser')
+
+            # extract quotes from unordered lists following headers that
+            # contain either the character's name or 'Quotes'
+            quotes = []
+            substrings = [self.character_name, 'Quotes']
+            for header_tag in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
+                for header in soup.find_all(header_tag):
+                    header_text = header.get_text().strip()
+
+                    # if header contains substring, find unordered lists
+                    # following the header
+                    if any(sub.lower() in header_text.lower() for sub in
+                           substrings):
+                        current_level = int(header.name[1])
+                        collected_quotes = []
+
+                        # iterate through the HTML elements that follow the
+                        # header
+                        sibling = header.find_next_sibling()
+                        while sibling:
+                            # if a header is encountered with equal or lesser
+                            # level that the current header level, then no more
+                            # unordered lists pertaining to the current section
+                            # were found, so break
+                            if sibling.name and sibling.name.startswith('h'):
+                                sibling_level = int(sibling.name[1])
+                                if sibling_level <= current_level:
+                                    break
+
+                            # get quotes from unordered list
+                            if sibling.name == 'ul':
+                                list_quotes = [
+                                    _keep_english_text(li.get_text().strip())
+                                    for li in sibling.find_all(
+                                        'li', recursive=False)]
+
+                                # remove quotes from other Street Fighter
+                                # characters extracted from the list
+                                filtered_list_quotes = []
+                                for list_quote in list_quotes:
+                                    if any(list_quote.find(
+                                            f'{char_name}:') == 0 for char_name
+                                            in set(SF_CHAR_WIKI_PAGES.keys())):
+                                        continue
+                                    filtered_list_quotes.append(list_quote)
+                                collected_quotes += filtered_list_quotes
+
+                            sibling = sibling.find_next_sibling()
+
+                        # add collected quotes to the accumulated list of
+                        # quotes
+                        if collected_quotes:
+                            quotes += collected_quotes
+
+            # return unique quotes, from longest to shortest
+            quotes = sorted(list(set(quotes)), key=len, reverse=True)
+            return quotes
+
         # set character name, get character context
-        sf_char_context = get_sf_char_context()
+        sf_char_context = scrape_sf_char_context()
+        sf_char_quotes = scrape_sf_char_quotes()
         self.logger.info(
-            f'Obtained context for {self.character_name} from Street Fighter Wiki.')
+            f'Obtained context for {self.character_name} from Street Fighter '
+            + 'Wiki.')
+
+        # extract personality from context
+        personality_keyword = '* Personality'
+        personality_contexts = list(filter(
+            lambda c: personality_keyword in c,
+            sf_char_context.split(DIVIDER)))
+        personality_texts = []
+        for text in personality_contexts:
+            # remove breadcrumbs
+            start_idx = text.find(personality_keyword)
+            offset = text[start_idx:].find('\n\n')
+            personality_texts.append(text[start_idx + offset:].strip())
+        personality_text = '\n'.join(personality_texts)
+        personality_summary_prompt = f'''
+            Please summarize this description of {self.character_name}'s
+            personality in at most {NUM_WORDS_PERSONALITY_DESC} words:
+
+            {DIVIDER}
+            {personality_text}
+            {DIVIDER}
+
+            Do not prefix your answer with anything like "Here is a summary of
+            ...". Just start describing {self.character_name}'s personality.
+        '''
+        personality_summary = chat_model.invoke(personality_summary_prompt)
 
         # get chunker
         chunker = RecursiveCharacterTextSplitter(
@@ -195,7 +296,7 @@ class StreetChatter:
 
         # split context into documents with metadata
         context_docs = []
-        for context_split in sf_char_context.split(SECTION_DIVIDER):
+        for context_split in sf_char_context.split(DIVIDER):
             # extract topic (section name) and text
             topic_and_text = context_split.split('\n\n', maxsplit=1)
             topic = topic_and_text[0].replace('* ', '')
@@ -235,11 +336,25 @@ class StreetChatter:
 
         # specify prompt template
         self.conv_history = []
+        example_quotes = '\n\n'.join(sf_char_quotes[:NUM_EXAMPLE_QUOTES])
         role_text = f'''
             You are a chatbot that assumes the role of {self.character_name}, a
             character from the Street Figher videogame series. You will answer
             the user's questions about {self.character_name} and their lore,
             from the perspective of {self.character_name}.
+
+            {self.character_name}'s personality can be described like so.
+            {DIVIDER}
+            {personality_summary.content}
+            {DIVIDER}
+
+            Here are some quotes from {self.character_name}:
+            {DIVIDER}
+            {example_quotes}
+            {DIVIDER}
+
+            Use the described personality and quotes as guidelines for
+            responding like {self.character_name} would.
         '''
         sys_prompt = role_text + '''
             The user asked: {input}.
@@ -252,7 +367,15 @@ class StreetChatter:
             Using only the retrieved context and the conversation history,
             answer the user's question conversationally, from the point of
             view of the Street Fighter character whose persona you have
-            assumed.
+            assumed. Use the personality description of the character to
+            respond as they would.
+
+            Do not use phrases like "(in a humble and respectful tone)" or
+            "(pauses, looking inward)" in your answer. Only include the text
+            for what you would speak in your answer.
+
+            Respond in such a way that flows naturally, based on the user's
+            question and the conversation history.
         '''
         prompt_template = ChatPromptTemplate.from_messages(
             self.conv_history + [('system', sys_prompt), ('user', '{input}')])
@@ -266,8 +389,14 @@ class StreetChatter:
         def _get_context_str(docs):
             return '\n\n'.join(list(map(lambda d: d.page_content, docs)))
 
-        # create retrieval augmented generation (RAG) chain
+        # for putting more similar retrieved documents at the beginning
+        # and end of the retrieved documents list, since LLMs are more likely
+        # to miss information in the middle of the list than information at
+        # the beginning or end of the list
         long_reorder = RunnableLambda(LongContextReorder().transform_documents)
+
+        # retrieval chain, for obtaining and including relevant context with
+        # the input to the LLM
         retrieval_chain = (
             {'input': (lambda x: x)}
             | RunnableAssign({
@@ -278,6 +407,8 @@ class StreetChatter:
                 | RunnableLambda(_get_context_str)
                 | RunnableLambda(lambda x: _log_message(
                     x, 'Retrieved relevant context from document store.'))}))
+
+        # generation chain, for generating LLM output to given input
         generation_chain = (
             RunnableLambda(lambda x: x)
             | RunnableAssign({'output': prompt_template | chat_model})
@@ -286,6 +417,9 @@ class StreetChatter:
                     + 'context.'))
             | RunnableLambda(lambda x: x['output'])
             | StrOutputParser())
+
+        # create retrieval augmented generation (RAG) chain, from retrieval
+        # and generation chain
         self.rag_chain = retrieval_chain | generation_chain
 
     def invoke(self, prompt):
