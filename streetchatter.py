@@ -378,7 +378,8 @@ class StreetChatter:
             question and the conversation history.
         '''
         prompt_template = ChatPromptTemplate.from_messages(
-            self.conv_history + [('system', sys_prompt), ('user', '{input}')])
+            [('system', sys_prompt)] + self.conv_history
+            + [('user', '{input}')])
 
         # utility function for logging
         def _log_message(input, message):
@@ -428,6 +429,7 @@ class StreetChatter:
 
         # update conversation history
         self.conv_history += [('user', prompt), ('assistant', response)]
+        self.conv_history = self.conv_history[-CONV_HISTORY_LIMIT:]
         self.logger.info('Updated conversation history with user prompt and '
                          + 'StreetChatter response')
 
