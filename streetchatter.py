@@ -379,17 +379,17 @@ class StreetChatter:
         '''
 
     def invoke(self, prompt):
-        # specify prompt template
+        # create prompt template
         prompt_template = ChatPromptTemplate.from_messages(
             [('system', self.sys_prompt)] + self.conv_history
             + [('user', '{input}')])
 
-        # utility function for logging
+        # function for logging
         def _log_message(input, message):
             self.logger.info(message)
             return input
 
-        # utility function for getting context string
+        # function for getting context string
         def _get_context_str(docs):
             return '\n\n'.join(list(map(lambda d: d.page_content, docs)))
 
