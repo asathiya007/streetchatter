@@ -332,12 +332,9 @@ class StreetChatter:
         # load context into document store
         self.doc_store.merge_from(
             FAISS.from_documents(context_docs, embedding_model))
-        self.logger.info('Loaded context into FAISS document store.')
+        self.logger.info('Loaded context into FAISS document store.')        
 
-        # initialize conversation history
-        self.conv_history = []
-
-        # prepare system prompt
+        # prepare system prompt and initialize conversation history
         example_quotes = '\n\n'.join(sf_char_quotes[:NUM_EXAMPLE_QUOTES])
         role_text = f'''
             You are a chatbot that assumes the role of {self.character_name}, a
@@ -358,6 +355,7 @@ class StreetChatter:
             Use the described personality and quotes as guidelines for
             responding like {self.character_name} would.
         '''
+        self.conv_history = []
         self.sys_prompt = role_text + '''
             The user asked: {input}.
 
